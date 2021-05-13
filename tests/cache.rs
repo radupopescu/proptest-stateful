@@ -83,7 +83,7 @@ mod tests {
 
     use super::{Cache, Result};
 
-    use proptest::{collection::vec, prelude::*};
+    use proptest::{collection::vec, prelude::*, strategy::Union};
 
     const MAX_CACHE_SIZE: usize = 10;
     const MAX_COMMAND_SEQUENCE_SIZE: usize = 10;
@@ -114,22 +114,31 @@ mod tests {
     }
 
     impl Command {
-        pub fn run(self, instance: &mut Cache) -> Result<()> {
+        pub fn run(self, instance: &mut Cache) -> Result<CommandResult> {
             match self {
                 Command::Get { key } => {
-                    let _v = instance.get(key)?;
-                    Ok(())
+                    let v = instance.get(key)?;
+                    match v {
+                        Some(v) => Ok(CommandResult::Some(v)),
+                        None => Ok(CommandResult::None)
+                    }
                 }
-                Command::Set { key, value } => instance.set(key, value),
-                Command::Flush => instance.flush(),
+                Command::Set { key, value } => {
+                    instance.set(key, value)?;
+                    Ok(CommandResult::None)
+                }
+                Command::Flush => {
+                    instance.flush()?;
+                    Ok(CommandResult::None)
+                }
             }
         }
     }
 
+    #[derive(PartialEq)]
     enum CommandResult {
-        Get { val: isize },
-        Set,
-        Flush,
+        Some(isize),
+        None,
     }
 
     struct Entry {
@@ -161,11 +170,13 @@ mod tests {
         }
 
         fn command(&self) -> impl Strategy<Value = Command> {
-            prop_oneof![
-                Model::key().prop_map(|k| Command::Get { key: k }),
-                (Model::key(), Model::val()).prop_map(|(k, v)| Command::Set { key: k, value: v }),
-                Just(Command::Flush)
-            ]
+            Union::new_weighted(
+                vec![
+                    (1, any::<isize>().prop_map(|k| Command::Get { key: k }).boxed()),
+                    (3, (any::<isize>(), any::<isize>()).prop_map(|(k, v)| Command::Set { key: k, value: v }).boxed()),
+                    (1, Just(Command::Flush).boxed())
+                ]
+            )
         }
 
         fn precondition(&self, cmd: Command) -> bool {
@@ -178,7 +189,17 @@ mod tests {
             true
         }
 
-        fn postcondition(&self, _cmd: Command, _res: CommandResult) -> bool {
+        fn postcondition(&self, cmd: Command, res: CommandResult) -> bool {
+            if let Command::Get { key } = cmd {
+                return match self.entries.get(&key) {
+                    Some(Entry { val, .. }) => {
+                        res == CommandResult::Some(*val)
+                    },
+                    None => {
+                        res == CommandResult::None
+                    }
+                }
+            }
             true
         }
 
@@ -199,7 +220,7 @@ mod tests {
                         }
                         self.max_index += 1;
                         self.entries.insert(key, Entry {index: self.max_index, val: value });
-                }
+                    }
                 }
                 Command::Flush => {
                     self.min_index = 0;
@@ -211,11 +232,13 @@ mod tests {
     }
 
     fn command_strategy() -> impl Strategy<Value = Command> {
-        prop_oneof![
-            any::<isize>().prop_map(|k| Command::Get { key: k }),
-            (any::<isize>(), any::<isize>()).prop_map(|(k, v)| Command::Set { key: k, value: v }),
-            Just(Command::Flush),
-        ]
+        Union::new_weighted(
+            vec![
+                (1, any::<isize>().prop_map(|k| Command::Get { key: k }).boxed()),
+                (3, (any::<isize>(), any::<isize>()).prop_map(|(k, v)| Command::Set { key: k, value: v }).boxed()),
+                (1, Just(Command::Flush).boxed())
+            ]
+        )
     }
 
     fn command_sequence_strategy() -> impl Strategy<Value = Vec<Command>> {

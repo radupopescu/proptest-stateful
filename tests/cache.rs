@@ -79,11 +79,14 @@ impl Cache {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
 
     use super::{Cache, Result};
 
-    use proptest::{collection::vec, prelude::*, strategy::Union};
+    use proptest::{collection::vec, prelude::*};
+
+    const MAX_CACHE_SIZE: usize = 10;
+    const MAX_COMMAND_SEQUENCE_SIZE: usize = 10;
 
     #[test]
     fn basic() -> Result<()> {
@@ -111,7 +114,7 @@ mod tests {
     }
 
     impl Command {
-        pub fn exec(self, instance: &mut Cache) -> Result<()> {
+        pub fn run(self, instance: &mut Cache) -> Result<()> {
             match self {
                 Command::Get { key } => {
                     let _v = instance.get(key)?;
@@ -119,6 +122,90 @@ mod tests {
                 }
                 Command::Set { key, value } => instance.set(key, value),
                 Command::Flush => instance.flush(),
+            }
+        }
+    }
+
+    enum CommandResult {
+        Get { val: isize },
+        Set,
+        Flush,
+    }
+
+    struct Entry {
+        index: usize,
+        val: isize,
+    }
+
+    struct Model {
+        entries: HashMap<isize, Entry>,
+        min_index: usize,
+        max_index: usize,
+    }
+
+    impl Model {
+        fn new() -> Model {
+            Model {
+                entries: HashMap::new(),
+                min_index: 0,
+                max_index: 0,
+            }
+        }
+
+        fn key() -> impl Strategy<Value = isize> {
+            prop_oneof![(1isize..(MAX_CACHE_SIZE as isize)), any::<isize>(),]
+        }
+
+        fn val() -> impl Strategy<Value = isize> {
+            any::<isize>()
+        }
+
+        fn command(&self) -> impl Strategy<Value = Command> {
+            prop_oneof![
+                Model::key().prop_map(|k| Command::Get { key: k }),
+                (Model::key(), Model::val()).prop_map(|(k, v)| Command::Set { key: k, value: v }),
+                Just(Command::Flush)
+            ]
+        }
+
+        fn precondition(&self, cmd: Command) -> bool {
+            if let Command::Flush = cmd {
+                if self.entries.is_empty() {
+                    return false;
+                }
+            }
+
+            true
+        }
+
+        fn postcondition(&self, _cmd: Command, _res: CommandResult) -> bool {
+            true
+        }
+
+        fn next_state(&mut self, _res: CommandResult, cmd: Command) {
+            match cmd {
+                Command::Get { key: _ } => {}
+                Command::Set { key, value } => {
+                    if let Some(entry) = self.entries.get_mut(&key) {
+                        entry.val = value;
+                    } else {
+                        if self.entries.len() == MAX_CACHE_SIZE {
+                            let key_to_delete = self.entries.iter()
+                            .filter(|&(_, v)| v.index == self.min_index)
+                            .map(|(k,_)| *k)
+                            .collect::<Vec<isize>>()[0];
+                            self.entries.remove(&key_to_delete);
+                            self.min_index += 1;
+                        }
+                        self.max_index += 1;
+                        self.entries.insert(key, Entry {index: self.max_index, val: value });
+                }
+                }
+                Command::Flush => {
+                    self.min_index = 0;
+                    self.max_index = 0;
+                    self.entries.clear();
+                }
             }
         }
     }
@@ -131,8 +218,6 @@ mod tests {
         ]
     }
 
-    const MAX_COMMAND_SEQUENCE_SIZE: usize = 10;
-
     fn command_sequence_strategy() -> impl Strategy<Value = Vec<Command>> {
         vec(command_strategy(), MAX_COMMAND_SEQUENCE_SIZE)
     }
@@ -140,11 +225,11 @@ mod tests {
     proptest! {
         #[test]
         fn simple_command_execution(commands in command_sequence_strategy()) {
-            if let Ok(mut cache) = Cache::new(10) {
+            if let Ok(mut cache) = Cache::new(MAX_CACHE_SIZE) {
                 println!("BEGIN");
                 for cmd in commands {
                     println!("{:?}", cmd);
-                    let _v = cmd.exec(&mut cache);
+                    let _v = cmd.run(&mut cache);
                 }
                 println!("END");
             }

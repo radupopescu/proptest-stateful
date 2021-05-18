@@ -79,32 +79,15 @@ impl Cache {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{any::Any, collections::HashMap};
 
     use super::{Cache, Result};
 
-    use proptest::{collection::vec, prelude::*, strategy::Union};
+    use proptest::prelude::*;
+    use proptest_stateful::{CommandSequenceStrategy, StateMachine};
 
     const MAX_CACHE_SIZE: usize = 10;
     const MAX_COMMAND_SEQUENCE_SIZE: usize = 10;
-
-    #[test]
-    fn basic() -> Result<()> {
-        let mut cache = Cache::new(2)?;
-
-        cache.set(1, 123)?;
-        assert_eq!(cache.get(1)?, Some(123));
-
-        cache.flush()?;
-        assert_eq!(cache.get(1)?, None);
-
-        cache.set(1, 123)?;
-        cache.set(2, 124)?;
-        cache.set(3, 125)?;
-        assert_eq!(cache.get(1)?, None);
-
-        Ok(())
-    }
 
     #[derive(Debug, Clone)]
     enum Command {
@@ -120,7 +103,7 @@ mod tests {
                     let v = instance.get(key)?;
                     match v {
                         Some(v) => Ok(CommandResult::Some(v)),
-                        None => Ok(CommandResult::None)
+                        None => Ok(CommandResult::None),
                     }
                 }
                 Command::Set { key, value } => {
@@ -141,69 +124,88 @@ mod tests {
         None,
     }
 
+    #[derive(Clone, Debug)]
     struct Entry {
         index: usize,
         val: isize,
     }
 
-    struct Model {
+    #[derive(Clone, Debug)]
+    struct CacheModel {
         entries: HashMap<isize, Entry>,
+        max_num_entries: usize,
         min_index: usize,
         max_index: usize,
     }
 
-    impl Model {
-        fn new() -> Model {
-            Model {
+    impl CacheModel {
+        fn new(max_num_entries: usize) -> CacheModel {
+            CacheModel {
                 entries: HashMap::new(),
+                max_num_entries,
                 min_index: 0,
                 max_index: 0,
             }
         }
 
-        fn key() -> impl Strategy<Value = isize> {
-            prop_oneof![(1isize..(MAX_CACHE_SIZE as isize)), any::<isize>(),]
+        fn key(&self) -> impl Strategy<Value = isize> {
+            prop_oneof![(1isize..(self.max_num_entries as isize)), any::<isize>(),]
         }
 
         fn val() -> impl Strategy<Value = isize> {
             any::<isize>()
         }
+    }
 
-        fn command(&self) -> impl Strategy<Value = Command> {
-            Union::new_weighted(
-                vec![
-                    (1, any::<isize>().prop_map(|k| Command::Get { key: k }).boxed()),
-                    (3, (any::<isize>(), any::<isize>()).prop_map(|(k, v)| Command::Set { key: k, value: v }).boxed()),
-                    (1, Just(Command::Flush).boxed())
-                ]
-            )
+    impl StateMachine<Command> for CacheModel {
+        fn reset(&mut self) {
+            self.entries.clear();
+            self.min_index = 0;
+            self.max_index = 0;
         }
 
-        fn precondition(&self, cmd: Command) -> bool {
-            if let Command::Flush = cmd {
-                if self.entries.is_empty() {
-                    return false;
-                }
+        fn commands(&self) -> Vec<(usize, BoxedStrategy<Command>)> {
+            let mut options = vec![
+                (
+                    1,
+                    self.key().prop_map(|k| Command::Get { key: k }).boxed(),
+                ),
+                (
+                    3,
+                    (self.key(), CacheModel::val())
+                        .prop_map(|(k, v)| Command::Set { key: k, value: v })
+                        .boxed(),
+                ),
+            ];
+            if !self.entries.is_empty() {
+                options.push((1, Just(Command::Flush).boxed()));
             }
-
-            true
+            options
         }
 
-        fn postcondition(&self, cmd: Command, res: CommandResult) -> bool {
+        fn postcondition(&self, cmd: Command, res: &(dyn Any)) -> bool {
             if let Command::Get { key } = cmd {
                 return match self.entries.get(&key) {
                     Some(Entry { val, .. }) => {
-                        res == CommandResult::Some(*val)
-                    },
-                    None => {
-                        res == CommandResult::None
+                        if let Some(cmd_res) = res.downcast_ref::<CommandResult>() {
+                            cmd_res == &CommandResult::Some(*val)
+                        } else {
+                            false
+                        }
                     }
-                }
+                    None => {
+                        if let Some(cmd_res) = res.downcast_ref::<CommandResult>() {
+                            cmd_res == &CommandResult::None
+                        } else {
+                            false
+                        }
+                    }
+                };
             }
             true
         }
 
-        fn next_state(&mut self, _res: CommandResult, cmd: Command) {
+        fn next_state(&mut self, cmd: Command) {
             match cmd {
                 Command::Get { key: _ } => {}
                 Command::Set { key, value } => {
@@ -211,15 +213,23 @@ mod tests {
                         entry.val = value;
                     } else {
                         if self.entries.len() == MAX_CACHE_SIZE {
-                            let key_to_delete = self.entries.iter()
-                            .filter(|&(_, v)| v.index == self.min_index)
-                            .map(|(k,_)| *k)
-                            .collect::<Vec<isize>>()[0];
+                            let key_to_delete = self
+                                .entries
+                                .iter()
+                                .filter(|&(_, v)| v.index == self.min_index)
+                                .map(|(k, _)| *k)
+                                .collect::<Vec<isize>>()[0];
                             self.entries.remove(&key_to_delete);
                             self.min_index += 1;
                         }
                         self.max_index += 1;
-                        self.entries.insert(key, Entry {index: self.max_index, val: value });
+                        self.entries.insert(
+                            key,
+                            Entry {
+                                index: self.max_index,
+                                val: value,
+                            },
+                        );
                     }
                 }
                 Command::Flush => {
@@ -231,23 +241,15 @@ mod tests {
         }
     }
 
-    fn command_strategy() -> impl Strategy<Value = Command> {
-        Union::new_weighted(
-            vec![
-                (1, any::<isize>().prop_map(|k| Command::Get { key: k }).boxed()),
-                (3, (any::<isize>(), any::<isize>()).prop_map(|(k, v)| Command::Set { key: k, value: v }).boxed()),
-                (1, Just(Command::Flush).boxed())
-            ]
-        )
-    }
-
-    fn command_sequence_strategy() -> impl Strategy<Value = Vec<Command>> {
-        vec(command_strategy(), MAX_COMMAND_SEQUENCE_SIZE)
+    fn command_sequence(max_size: usize) -> CommandSequenceStrategy<BoxedStrategy<Command>, CacheModel>
+    {
+        let state_machine = CacheModel::new(MAX_CACHE_SIZE);
+        CommandSequenceStrategy::new(max_size, state_machine)
     }
 
     proptest! {
         #[test]
-        fn simple_command_execution(commands in command_sequence_strategy()) {
+        fn simple_command_execution(commands in command_sequence(MAX_COMMAND_SEQUENCE_SIZE)) {
             if let Ok(mut cache) = Cache::new(MAX_CACHE_SIZE) {
                 println!("BEGIN");
                 for cmd in commands {

@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 proptest = "1.0.0"
+rand = "^0.8.0"
 
 [dependencies.rusqlite]
 version = "0.25.1"

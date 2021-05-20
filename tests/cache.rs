@@ -1,3 +1,10 @@
+//-
+// Copyright 2021 Radu Popescu <mail@radupopescu.net>
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 /// Basic in-memory cache backed by SQLite.
 ///
 /// This test is based on Chapter 9 of the book "Property-Based Testing with PropEr", by Fred Hebert
@@ -81,44 +88,47 @@ impl Cache {
 mod tests {
     use std::{any::Any, collections::HashMap};
 
-    use super::{Cache, Result};
+    use super::Cache;
 
     use proptest::prelude::*;
-    use proptest_stateful::{CommandSequenceStrategy, StateMachine};
+    use proptest_stateful::{Command, CommandSequenceStrategy, StateMachine, errors::{Error, Result}};
 
     const MAX_CACHE_SIZE: usize = 10;
-    const MAX_COMMAND_SEQUENCE_SIZE: usize = 10;
+    const MAX_COMMAND_SEQUENCE_SIZE: usize = 20;
 
     #[derive(Debug, Clone)]
-    enum Command {
+    enum CacheCommand {
         Get { key: isize },
         Set { key: isize, value: isize },
         Flush,
     }
 
-    impl Command {
-        pub fn run(self, instance: &mut Cache) -> Result<CommandResult> {
+    impl Command for CacheCommand {
+        fn run(&self, instance: &mut (dyn Any)) -> Result<Box<dyn Any>> {
+            let cache = instance
+                .downcast_mut::<Cache>()
+                .ok_or_else(|| "Invalid argument. Expecting instance of system-under-test")?;
             match self {
-                Command::Get { key } => {
-                    let v = instance.get(key)?;
+                &CacheCommand::Get { key } => {
+                    let v = cache.get(key)?;
                     match v {
-                        Some(v) => Ok(CommandResult::Some(v)),
-                        None => Ok(CommandResult::None),
+                        Some(v) => Ok(Box::new(CommandResult::Some(v))),
+                        None => Ok(Box::new(CommandResult::None)),
                     }
                 }
-                Command::Set { key, value } => {
-                    instance.set(key, value)?;
-                    Ok(CommandResult::None)
+                &CacheCommand::Set { key, value } => {
+                    cache.set(key, value)?;
+                    Ok(Box::new(CommandResult::None))
                 }
-                Command::Flush => {
-                    instance.flush()?;
-                    Ok(CommandResult::None)
+                &CacheCommand::Flush => {
+                    cache.flush()?;
+                    Ok(Box::new(CommandResult::None))
                 }
             }
         }
     }
 
-    #[derive(PartialEq)]
+    #[derive(Debug, PartialEq)]
     enum CommandResult {
         Some(isize),
         None,
@@ -157,62 +167,74 @@ mod tests {
         }
     }
 
-    impl StateMachine<Command> for CacheModel {
+    impl StateMachine<CacheCommand> for CacheModel {
         fn reset(&mut self) {
             self.entries.clear();
             self.min_index = 0;
             self.max_index = 0;
         }
 
-        fn commands(&self) -> Vec<(usize, BoxedStrategy<Command>)> {
+        fn commands(&self) -> Vec<(usize, BoxedStrategy<CacheCommand>)> {
             let mut options = vec![
                 (
                     1,
-                    self.key().prop_map(|k| Command::Get { key: k }).boxed(),
+                    self.key()
+                        .prop_map(|k| CacheCommand::Get { key: k })
+                        .boxed(),
                 ),
                 (
                     3,
                     (self.key(), CacheModel::val())
-                        .prop_map(|(k, v)| Command::Set { key: k, value: v })
+                        .prop_map(|(k, v)| CacheCommand::Set { key: k, value: v })
                         .boxed(),
                 ),
             ];
             if !self.entries.is_empty() {
-                options.push((1, Just(Command::Flush).boxed()));
+                options.push((1, Just(CacheCommand::Flush).boxed()));
             }
             options
         }
 
-        fn postcondition(&self, cmd: Command, res: &(dyn Any)) -> bool {
-            if let Command::Get { key } = cmd {
-                return match self.entries.get(&key) {
+        fn postcondition(&self, cmd: &CacheCommand, res: Box<dyn Any>) -> Result<()> {
+            if let CacheCommand::Get { key } = cmd {
+                match self.entries.get(&key) {
                     Some(Entry { val, .. }) => {
                         if let Some(cmd_res) = res.downcast_ref::<CommandResult>() {
-                            cmd_res == &CommandResult::Some(*val)
+                            if cmd_res != &CommandResult::Some(*val) {
+                                return Result::Err(Error::Postcondition {
+                                    expected: format!("{:?}", CommandResult::Some(*val)),
+                                    actual: format!("{:?}", *cmd_res),
+                                }.into())
+                            }
                         } else {
-                            false
+                            panic!("Invalid command result data type")
                         }
                     }
                     None => {
                         if let Some(cmd_res) = res.downcast_ref::<CommandResult>() {
-                            cmd_res == &CommandResult::None
+                            if cmd_res != &CommandResult::None {
+                                return Result::Err(Error::Postcondition {
+                                    expected: format!("{:?}", CommandResult::None),
+                                    actual: format!("{:?}", *cmd_res),
+                                }.into())
+                            }
                         } else {
-                            false
+                            panic!("Invalid command result data type")
                         }
                     }
-                };
+                }
             }
-            true
+            Ok(())
         }
 
-        fn next_state(&mut self, cmd: Command) {
+        fn next_state(&mut self, cmd: &CacheCommand) {
             match cmd {
-                Command::Get { key: _ } => {}
-                Command::Set { key, value } => {
+                &CacheCommand::Get { key: _ } => {}
+                &CacheCommand::Set { key, value } => {
                     if let Some(entry) = self.entries.get_mut(&key) {
                         entry.val = value;
                     } else {
-                        if self.entries.len() == MAX_CACHE_SIZE {
+                        if self.entries.len() == self.max_num_entries {
                             let key_to_delete = self
                                 .entries
                                 .iter()
@@ -222,7 +244,6 @@ mod tests {
                             self.entries.remove(&key_to_delete);
                             self.min_index += 1;
                         }
-                        self.max_index += 1;
                         self.entries.insert(
                             key,
                             Entry {
@@ -230,9 +251,10 @@ mod tests {
                                 val: value,
                             },
                         );
+                        self.max_index += 1;
                     }
                 }
-                Command::Flush => {
+                &CacheCommand::Flush => {
                     self.min_index = 0;
                     self.max_index = 0;
                     self.entries.clear();
@@ -241,22 +263,20 @@ mod tests {
         }
     }
 
-    fn command_sequence(max_size: usize) -> CommandSequenceStrategy<BoxedStrategy<Command>, CacheModel>
-    {
+    fn command_sequence(
+        max_size: usize,
+    ) -> CommandSequenceStrategy<BoxedStrategy<CacheCommand>, CacheModel> {
         let state_machine = CacheModel::new(MAX_CACHE_SIZE);
         CommandSequenceStrategy::new(max_size, state_machine)
     }
 
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(10))]
         #[test]
         fn simple_command_execution(commands in command_sequence(MAX_COMMAND_SEQUENCE_SIZE)) {
             if let Ok(mut cache) = Cache::new(MAX_CACHE_SIZE) {
-                println!("BEGIN");
-                for cmd in commands {
-                    println!("{:?}", cmd);
-                    let _v = cmd.run(&mut cache);
-                }
-                println!("END");
+                let mut model = CacheModel::new(MAX_CACHE_SIZE);
+                let _ = commands.run(&mut model, &mut cache);
             }
         }
     }

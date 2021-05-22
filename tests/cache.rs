@@ -91,11 +91,7 @@ mod tests {
     use super::Cache;
 
     use proptest::prelude::*;
-    use proptest_stateful::{
-        command_sequence,
-        errors::{Error, Result},
-        Command, StateMachine,
-    };
+    use proptest_stateful::{Command, StateMachine, errors::{Error, Result}, execute_plan};
 
     #[derive(Debug, Clone)]
     enum CacheCommand {
@@ -105,7 +101,7 @@ mod tests {
     }
 
     impl Command for CacheCommand {
-        fn run(&self, instance: &mut (dyn Any)) -> Result<Box<dyn Any>> {
+        fn run(&self, instance: &mut Box<dyn Any>) -> Result<Box<dyn Any>> {
             if let Some(cache) = instance.downcast_mut::<Cache>() {
                 match self {
                     &CacheCommand::Get { key } => {
@@ -273,21 +269,24 @@ mod tests {
         }
     }
 
-    const MAX_CACHE_SIZE: usize = 10;
-    const MAX_COMMAND_SEQUENCE_SIZE: usize = 100;
-    const MAX_SHRINK_ITERS: u32 = 10;
 
-    proptest! {
-        #![proptest_config(ProptestConfig {
-            cases: 10,
-            max_shrink_iters: MAX_SHRINK_ITERS,
-            .. ProptestConfig::default() }
-        )]
-        #[test]
-        fn simple_command_execution(commands in command_sequence(MAX_COMMAND_SEQUENCE_SIZE, || CacheModel::new(MAX_CACHE_SIZE))) {
-            let mut cache = Cache::new(MAX_CACHE_SIZE).expect("Could not construct Cache");
-            let mut model = CacheModel::new(MAX_CACHE_SIZE);
-            assert!(commands.run(&mut model, &mut cache).is_ok());
-        }
+    #[test]
+    fn basic_command_execution() {
+        const MAX_CACHE_SIZE: usize = 10;
+        const MAX_COMMAND_SEQUENCE_SIZE: usize = 100;
+
+        execute_plan(
+            ProptestConfig {
+                max_shrink_iters: 100,
+                source_file: Some("tests/cache.rs"),
+                ..ProptestConfig::default()
+            },
+            MAX_COMMAND_SEQUENCE_SIZE,
+            || {
+                CacheModel::new(MAX_CACHE_SIZE)
+            },
+            || {
+                Box::new(Cache::new(MAX_CACHE_SIZE).expect("Could not construct Cache"))
+            });
     }
 }

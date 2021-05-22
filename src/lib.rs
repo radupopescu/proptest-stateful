@@ -9,7 +9,11 @@ pub mod errors;
 
 use std::{any::Any, fmt::Debug, marker::PhantomData};
 
-use proptest::strategy::{BoxedStrategy, NewTree, Strategy, ValueTree};
+use proptest::{
+    prelude::ProptestConfig,
+    strategy::{BoxedStrategy, NewTree, Strategy, ValueTree},
+    test_runner::TestRunner,
+};
 use rand::distributions::{uniform::Uniform, Distribution, WeightedIndex};
 
 use errors::Result;
@@ -17,37 +21,32 @@ use errors::Result;
 const MIN_COMMAND_SEQUENCE_SIZE: usize = 1;
 
 pub trait Command {
-    fn run(&self, system_under_test: &mut (dyn Any)) -> Result<Box<dyn Any>>;
+    fn run(&self, system_under_test: &mut Box<dyn Any>) -> Result<Box<dyn Any>>;
 }
 
 #[derive(Debug)]
-pub struct CommandSequence<C> {
+pub struct CommandSequence<C, SM> {
     commands: Vec<C>,
+    state_machine: SM,
 }
 
-impl<C> CommandSequence<C>
+impl<C, SM> CommandSequence<C, SM>
 where
     C: Command,
+    SM: StateMachine<C>,
 {
-    pub fn run<SM: StateMachine<C>>(
-        &self,
-        model: &mut SM,
-        system_under_test: &mut (dyn Any),
-    ) -> Result<()> {
-        model.reset();
+    pub fn run(&mut self, system_under_test: &mut Box<dyn Any>) -> Result<()> {
+        self.state_machine.reset();
         for cmd in &self.commands {
             let result = cmd.run(system_under_test)?;
-            model.next_state(&cmd);
-            if let Err(e) = model.postcondition(&cmd, result) {
-                eprintln!("Property test failed: {}", e);
-                return Err(e)
-            }
+            self.state_machine.next_state(&cmd);
+            self.state_machine.postcondition(&cmd, result)?;
         }
         Ok(())
     }
 }
 
-impl<C> IntoIterator for CommandSequence<C> {
+impl<C, SM> IntoIterator for CommandSequence<C, SM> {
     type Item = C;
 
     type IntoIter = std::vec::IntoIter<Self::Item>;
@@ -69,15 +68,20 @@ enum Shrink {
     DeleteCommand,
     ShrinkCommand(usize),
 }
-pub struct CommandSequenceValueTree<C> {
+pub struct CommandSequenceValueTree<C, SM> {
     elements: Vec<Box<dyn ValueTree<Value = C>>>,
+    state_machine: SM,
     num_included: usize,
     shrink: Shrink,
     prev_shrink: Option<Shrink>,
 }
 
-impl<C: Debug> ValueTree for CommandSequenceValueTree<C> {
-    type Value = CommandSequence<C>;
+impl<C, SM> ValueTree for CommandSequenceValueTree<C, SM>
+where
+    C: std::fmt::Debug,
+    SM: Clone + std::fmt::Debug,
+{
+    type Value = CommandSequence<C, SM>;
 
     fn current(&self) -> Self::Value {
         let commands = self
@@ -87,7 +91,10 @@ impl<C: Debug> ValueTree for CommandSequenceValueTree<C> {
             .take(self.num_included)
             .map(|(_, element)| element.current())
             .collect();
-        CommandSequence { commands }
+        CommandSequence {
+            commands,
+            state_machine: self.state_machine.clone(),
+        }
     }
 
     fn simplify(&mut self) -> bool {
@@ -167,12 +174,6 @@ where
             _strategy: PhantomData,
         }
     }
-
-    fn state_machine(&self) -> SM {
-        let mut sm = self.state_machine.clone();
-        sm.reset();
-        sm
-    }
 }
 
 impl<S, SM> Strategy for CommandSequenceStrategy<S, SM>
@@ -180,13 +181,14 @@ where
     S: Strategy,
     SM: StateMachine<S::Value> + Clone + Debug,
 {
-    type Tree = CommandSequenceValueTree<S::Value>;
-    type Value = CommandSequence<S::Value>;
+    type Tree = CommandSequenceValueTree<S::Value, SM>;
+    type Value = CommandSequence<S::Value, SM>;
 
     fn new_tree(&self, runner: &mut proptest::test_runner::TestRunner) -> NewTree<Self> {
         let size = Uniform::new_inclusive(1, self.max_size).sample(runner.rng());
 
-        let mut state_machine = self.state_machine();
+        let mut state_machine = self.state_machine.clone();
+        state_machine.reset();
         let mut elements = Vec::with_capacity(size);
         while elements.len() < size {
             let possible_commands = state_machine.commands();
@@ -202,9 +204,11 @@ where
             state_machine.next_state(&command.current());
             elements.push(command);
         }
+        state_machine.reset();
         let num_included = elements.len();
         Ok(CommandSequenceValueTree {
             elements,
+            state_machine,
             num_included,
             shrink: Shrink::DeleteCommand,
             prev_shrink: None,
@@ -222,4 +226,30 @@ where
     F: Fn() -> SM,
 {
     CommandSequenceStrategy::new(max_size, state_machine_builder())
+}
+
+pub fn execute_plan<SM, S, SMF, SUTF>(
+    config: ProptestConfig,
+    max_sequence_size: usize,
+    state_machine_factory: SMF,
+    system_under_test_factory: SUTF
+) where
+    S: Command + std::fmt::Debug,
+    SM: StateMachine<S> + Clone + std::fmt::Debug,
+    SMF: Fn() -> SM,
+    SUTF: Fn() -> Box<dyn Any>
+{
+    let mut runner = TestRunner::new(config);
+
+    let result = runner.run(
+        &command_sequence(max_sequence_size, state_machine_factory),
+        |mut commands| {
+            let mut system_under_test = system_under_test_factory();
+            commands.run(&mut system_under_test)?;
+            Ok(())
+        }
+    );
+    if let Err(e) = result {
+        println!("Found minimal failing case: {}", e);
+    }
 }

@@ -38,7 +38,10 @@ where
         for cmd in &self.commands {
             let result = cmd.run(system_under_test)?;
             model.next_state(&cmd);
-            model.postcondition(&cmd, result)?;
+            if let Err(e) = model.postcondition(&cmd, result) {
+                eprintln!("Property test failed: {}", e);
+                return Err(e)
+            }
         }
         Ok(())
     }
@@ -156,7 +159,7 @@ where
     S: Strategy,
     SM: StateMachine<S::Value> + Clone,
 {
-    pub fn new(max_size: usize, state_machine: SM) -> Self {
+    fn new(max_size: usize, state_machine: SM) -> Self {
         assert!(max_size >= MIN_COMMAND_SEQUENCE_SIZE);
         CommandSequenceStrategy {
             state_machine,
@@ -192,7 +195,7 @@ where
                 .map(|(w, _)| *w)
                 .collect::<Vec<usize>>();
             let choice = WeightedIndex::new(&weights)
-                .map_err(|_| "Could not construct weighted index distribution")?
+                .map_err(|e| e.to_string())?
                 .sample(runner.rng());
             let (_, ref command_strategy) = possible_commands[choice];
             let command = command_strategy.new_tree(runner)?;
@@ -207,4 +210,16 @@ where
             prev_shrink: None,
         })
     }
+}
+
+pub fn command_sequence<C, SM, F>(
+    max_size: usize,
+    state_machine_builder: F,
+) -> CommandSequenceStrategy<BoxedStrategy<C>, SM>
+where
+    C: std::fmt::Debug,
+    SM: StateMachine<C> + Clone,
+    F: Fn() -> SM,
+{
+    CommandSequenceStrategy::new(max_size, state_machine_builder())
 }

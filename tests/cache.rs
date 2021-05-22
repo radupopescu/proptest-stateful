@@ -91,10 +91,11 @@ mod tests {
     use super::Cache;
 
     use proptest::prelude::*;
-    use proptest_stateful::{Command, CommandSequenceStrategy, StateMachine, errors::{Error, Result}};
-
-    const MAX_CACHE_SIZE: usize = 10;
-    const MAX_COMMAND_SEQUENCE_SIZE: usize = 20;
+    use proptest_stateful::{
+        command_sequence,
+        errors::{Error, Result},
+        Command, StateMachine,
+    };
 
     #[derive(Debug, Clone)]
     enum CacheCommand {
@@ -105,25 +106,32 @@ mod tests {
 
     impl Command for CacheCommand {
         fn run(&self, instance: &mut (dyn Any)) -> Result<Box<dyn Any>> {
-            let cache = instance
-                .downcast_mut::<Cache>()
-                .ok_or_else(|| "Invalid argument. Expecting instance of system-under-test")?;
-            match self {
-                &CacheCommand::Get { key } => {
-                    let v = cache.get(key)?;
-                    match v {
-                        Some(v) => Ok(Box::new(CommandResult::Some(v))),
-                        None => Ok(Box::new(CommandResult::None)),
+            if let Some(cache) = instance.downcast_mut::<Cache>() {
+                match self {
+                    &CacheCommand::Get { key } => {
+                        let v = cache
+                            .get(key)
+                            .map_err(|e| Error::new_system_execution_error(e))?;
+                        match v {
+                            Some(v) => Ok(Box::new(CommandResult::Some(v))),
+                            None => Ok(Box::new(CommandResult::None)),
+                        }
+                    }
+                    &CacheCommand::Set { key, value } => {
+                        cache
+                            .set(key, value)
+                            .map_err(|e| Error::new_system_execution_error(e))?;
+                        Ok(Box::new(CommandResult::None))
+                    }
+                    &CacheCommand::Flush => {
+                        cache
+                            .flush()
+                            .map_err(|e| Error::new_system_execution_error(e))?;
+                        Ok(Box::new(CommandResult::None))
                     }
                 }
-                &CacheCommand::Set { key, value } => {
-                    cache.set(key, value)?;
-                    Ok(Box::new(CommandResult::None))
-                }
-                &CacheCommand::Flush => {
-                    cache.flush()?;
-                    Ok(Box::new(CommandResult::None))
-                }
+            } else {
+                panic!("Invalid argument. Expecting instance of system-under-test");
             }
         }
     }
@@ -201,10 +209,11 @@ mod tests {
                     Some(Entry { val, .. }) => {
                         if let Some(cmd_res) = res.downcast_ref::<CommandResult>() {
                             if cmd_res != &CommandResult::Some(*val) {
-                                return Result::Err(Error::Postcondition {
-                                    expected: format!("{:?}", CommandResult::Some(*val)),
-                                    actual: format!("{:?}", *cmd_res),
-                                }.into())
+                                return Result::Err(Error::new_postcondition_error(
+                                    format!("{:?}", cmd),
+                                    format!("{:?}", CommandResult::Some(*val)),
+                                    format!("{:?}", *cmd_res),
+                                ));
                             }
                         } else {
                             panic!("Invalid command result data type")
@@ -213,10 +222,11 @@ mod tests {
                     None => {
                         if let Some(cmd_res) = res.downcast_ref::<CommandResult>() {
                             if cmd_res != &CommandResult::None {
-                                return Result::Err(Error::Postcondition {
-                                    expected: format!("{:?}", CommandResult::None),
-                                    actual: format!("{:?}", *cmd_res),
-                                }.into())
+                                return Result::Err(Error::new_postcondition_error(
+                                    format!("{:?}", cmd),
+                                    format!("{:?}", CommandResult::None),
+                                    format!("{:?}", *cmd_res),
+                                ));
                             }
                         } else {
                             panic!("Invalid command result data type")
@@ -263,21 +273,21 @@ mod tests {
         }
     }
 
-    fn command_sequence(
-        max_size: usize,
-    ) -> CommandSequenceStrategy<BoxedStrategy<CacheCommand>, CacheModel> {
-        let state_machine = CacheModel::new(MAX_CACHE_SIZE);
-        CommandSequenceStrategy::new(max_size, state_machine)
-    }
+    const MAX_CACHE_SIZE: usize = 10;
+    const MAX_COMMAND_SEQUENCE_SIZE: usize = 100;
+    const MAX_SHRINK_ITERS: u32 = 10;
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10))]
+        #![proptest_config(ProptestConfig {
+            cases: 10,
+            max_shrink_iters: MAX_SHRINK_ITERS,
+            .. ProptestConfig::default() }
+        )]
         #[test]
-        fn simple_command_execution(commands in command_sequence(MAX_COMMAND_SEQUENCE_SIZE)) {
-            if let Ok(mut cache) = Cache::new(MAX_CACHE_SIZE) {
-                let mut model = CacheModel::new(MAX_CACHE_SIZE);
-                let _ = commands.run(&mut model, &mut cache);
-            }
+        fn simple_command_execution(commands in command_sequence(MAX_COMMAND_SEQUENCE_SIZE, || CacheModel::new(MAX_CACHE_SIZE))) {
+            let mut cache = Cache::new(MAX_CACHE_SIZE).expect("Could not construct Cache");
+            let mut model = CacheModel::new(MAX_CACHE_SIZE);
+            assert!(commands.run(&mut model, &mut cache).is_ok());
         }
     }
 }

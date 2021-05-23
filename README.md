@@ -1,6 +1,6 @@
 # proptest-stateful - property-based testing for stateful systems
 
-[![Build status](https://travis-ci.org/radupopescu/proptest-stateful.svg?branch=master)](https://travis-ci.org/radupopescu/proptest-stateful)
+[![Build status](Rust Workflow)](https://github.com/<OWNER>/<REPOSITORY>/actions/workflows/<WORKFLOW_FILE>/badge.svg)
 
 ## Overview
 

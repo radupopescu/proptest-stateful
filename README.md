@@ -1,6 +1,6 @@
 # proptest-stateful - property-based testing for stateful systems
 
-[![Build status](Rust Workflow)](https://github.com/<OWNER>/<REPOSITORY>/actions/workflows/<WORKFLOW_FILE>/badge.svg)
+[![Build status](Rust Workflow)](https://github.com/radupopescu/proptest-stateful/.github/workflows/rust.yml/badge.svg)
 
 ## Overview
 

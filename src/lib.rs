@@ -7,7 +7,7 @@
 
 pub mod errors;
 
-use std::{any::Any, fmt::Debug, marker::PhantomData};
+use std::{fmt::Debug, marker::PhantomData};
 
 use proptest::{
     prelude::ProptestConfig,
@@ -20,34 +20,37 @@ use errors::Result;
 
 const MIN_COMMAND_SEQUENCE_SIZE: usize = 1;
 
-pub trait Command {
-    fn run(&self, system_under_test: &mut Box<dyn Any>) -> Result<Box<dyn Any>>;
+pub trait SystemUnderTest<C, R> {
+    fn run(&mut self, cmd: &C) -> Result<R>;
 }
 
 #[derive(Debug)]
-pub struct CommandSequence<C, SM> {
-    commands: Vec<C>,
+pub struct CommandSequence<SM>
+where SM: StateMachine
+{
+    commands: Vec<SM::Command>,
     state_machine: SM,
 }
 
-impl<C, SM> CommandSequence<C, SM>
+impl<SM> CommandSequence<SM>
 where
-    C: Command,
-    SM: StateMachine<C>,
+    SM: StateMachine,
 {
-    pub fn run(&mut self, system_under_test: &mut Box<dyn Any>) -> Result<()> {
+    pub fn run(&mut self, system_under_test: &mut Box<dyn SystemUnderTest<SM::Command, SM::CommandResult>>) -> Result<()> {
         self.state_machine.reset();
         for cmd in &self.commands {
-            let result = cmd.run(system_under_test)?;
+            let result = system_under_test.run(cmd)?;
             self.state_machine.next_state(&cmd);
-            self.state_machine.postcondition(&cmd, result)?;
+            self.state_machine.postcondition(&cmd, &result)?;
         }
         Ok(())
     }
 }
 
-impl<C, SM> IntoIterator for CommandSequence<C, SM> {
-    type Item = C;
+impl<SM> IntoIterator for CommandSequence<SM>
+where SM: StateMachine
+{
+    type Item = SM::Command;
 
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
@@ -56,11 +59,14 @@ impl<C, SM> IntoIterator for CommandSequence<C, SM> {
     }
 }
 
-pub trait StateMachine<C> {
+pub trait StateMachine {
+    type Command: std::fmt::Debug;
+    type CommandResult: std::fmt::Debug;
+
     fn reset(&mut self);
-    fn commands(&self) -> Vec<(usize, BoxedStrategy<C>)>;
-    fn postcondition(&self, cmd: &C, res: Box<(dyn Any)>) -> Result<()>;
-    fn next_state(&mut self, cmd: &C);
+    fn commands(&self) -> Vec<(usize, BoxedStrategy<Self::Command>)>;
+    fn postcondition(&self, cmd: &Self::Command, res: &Self::CommandResult) -> Result<()>;
+    fn next_state(&mut self, cmd: &Self::Command);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,20 +74,21 @@ enum Shrink {
     DeleteCommand,
     ShrinkCommand(usize),
 }
-pub struct CommandSequenceValueTree<C, SM> {
-    elements: Vec<Box<dyn ValueTree<Value = C>>>,
+pub struct CommandSequenceValueTree<SM>
+where SM: StateMachine
+{
+    elements: Vec<Box<dyn ValueTree<Value = SM::Command>>>,
     state_machine: SM,
     num_included: usize,
     shrink: Shrink,
     prev_shrink: Option<Shrink>,
 }
 
-impl<C, SM> ValueTree for CommandSequenceValueTree<C, SM>
+impl<SM> ValueTree for CommandSequenceValueTree<SM>
 where
-    C: std::fmt::Debug,
-    SM: Clone + std::fmt::Debug,
+    SM: StateMachine + Clone + std::fmt::Debug
 {
-    type Value = CommandSequence<C, SM>;
+    type Value = CommandSequence<SM>;
 
     fn current(&self) -> Self::Value {
         let commands = self
@@ -154,7 +161,7 @@ where
 pub struct CommandSequenceStrategy<S, SM>
 where
     S: Strategy,
-    SM: StateMachine<S::Value> + Clone,
+    SM: StateMachine + Clone,
 {
     state_machine: SM,
     max_size: usize,
@@ -164,7 +171,7 @@ where
 impl<S, SM> CommandSequenceStrategy<S, SM>
 where
     S: Strategy,
-    SM: StateMachine<S::Value> + Clone,
+    SM: StateMachine + Clone,
 {
     fn new(max_size: usize, state_machine: SM) -> Self {
         assert!(max_size >= MIN_COMMAND_SEQUENCE_SIZE);
@@ -179,10 +186,10 @@ where
 impl<S, SM> Strategy for CommandSequenceStrategy<S, SM>
 where
     S: Strategy,
-    SM: StateMachine<S::Value> + Clone + Debug,
+    SM: StateMachine + Clone + Debug,
 {
-    type Tree = CommandSequenceValueTree<S::Value, SM>;
-    type Value = CommandSequence<S::Value, SM>;
+    type Tree = CommandSequenceValueTree<SM>;
+    type Value = CommandSequence<SM>;
 
     fn new_tree(&self, runner: &mut proptest::test_runner::TestRunner) -> NewTree<Self> {
         let size = Uniform::new_inclusive(1, self.max_size).sample(runner.rng());
@@ -216,36 +223,32 @@ where
     }
 }
 
-pub fn command_sequence<C, SM, F>(
+pub fn command_sequence<SM>(
     max_size: usize,
-    state_machine_builder: F,
-) -> CommandSequenceStrategy<BoxedStrategy<C>, SM>
+    state_machine: SM,
+) -> CommandSequenceStrategy<BoxedStrategy<SM::Command>, SM>
 where
-    C: std::fmt::Debug,
-    SM: StateMachine<C> + Clone,
-    F: Fn() -> SM,
+    SM: StateMachine + Clone,
 {
-    CommandSequenceStrategy::new(max_size, state_machine_builder())
+    CommandSequenceStrategy::new(max_size, state_machine)
 }
 
-pub fn execute_plan<SM, S, SMF, SUTF>(
+pub fn execute_plan<SM, SUTF>(
     config: ProptestConfig,
     max_sequence_size: usize,
-    state_machine_factory: SMF,
+    state_machine: SM,
     system_under_test_factory: SUTF
 ) where
-    S: Command + std::fmt::Debug,
-    SM: StateMachine<S> + Clone + std::fmt::Debug,
-    SMF: Fn() -> SM,
-    SUTF: Fn() -> Box<dyn Any>
+    SM: StateMachine + Clone + std::fmt::Debug,
+    SUTF: Fn() -> Box<dyn SystemUnderTest<SM::Command, SM::CommandResult>>
 {
     let mut runner = TestRunner::new(config);
 
     let result = runner.run(
-        &command_sequence(max_sequence_size, state_machine_factory),
+        &command_sequence(max_sequence_size, state_machine),
         |mut commands| {
-            let mut system_under_test = system_under_test_factory();
-            commands.run(&mut system_under_test)?;
+            let mut sys = system_under_test_factory();
+            commands.run(&mut sys)?;
             Ok(())
         }
     );

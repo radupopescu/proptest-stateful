@@ -86,12 +86,12 @@ impl Cache {
 
 #[cfg(test)]
 mod tests {
-    use std::{any::Any, collections::HashMap};
+    use std::collections::HashMap;
 
     use super::Cache;
 
     use proptest::prelude::*;
-    use proptest_stateful::{Command, StateMachine, errors::{Error, Result}, execute_plan};
+    use proptest_stateful::{StateMachine, SystemUnderTest, errors::{Error, Result}, execute_plan};
 
     #[derive(Debug, Clone)]
     enum CacheCommand {
@@ -100,42 +100,38 @@ mod tests {
         Flush,
     }
 
-    impl Command for CacheCommand {
-        fn run(&self, instance: &mut Box<dyn Any>) -> Result<Box<dyn Any>> {
-            if let Some(cache) = instance.downcast_mut::<Cache>() {
-                match self {
-                    &CacheCommand::Get { key } => {
-                        let v = cache
-                            .get(key)
-                            .map_err(|e| Error::new_system_execution_error(e))?;
-                        match v {
-                            Some(v) => Ok(Box::new(CommandResult::Some(v))),
-                            None => Ok(Box::new(CommandResult::None)),
-                        }
-                    }
-                    &CacheCommand::Set { key, value } => {
-                        cache
-                            .set(key, value)
-                            .map_err(|e| Error::new_system_execution_error(e))?;
-                        Ok(Box::new(CommandResult::None))
-                    }
-                    &CacheCommand::Flush => {
-                        cache
-                            .flush()
-                            .map_err(|e| Error::new_system_execution_error(e))?;
-                        Ok(Box::new(CommandResult::None))
-                    }
-                }
-            } else {
-                panic!("Invalid argument. Expecting instance of system-under-test");
-            }
-        }
-    }
-
     #[derive(Debug, PartialEq)]
     enum CommandResult {
         Some(isize),
         None,
+    }
+
+    impl SystemUnderTest<CacheCommand, CommandResult> for Cache {
+        fn run(&mut self, cmd: &CacheCommand) -> Result<CommandResult> {
+            match cmd {
+                &CacheCommand::Get { key } => {
+                    let v = self
+                        .get(key)
+                        .map_err(|e| Error::new_system_execution_error(e))?;
+                    match v {
+                        Some(v) => Ok(CommandResult::Some(v)),
+                        None => Ok(CommandResult::None),
+                    }
+                }
+                &CacheCommand::Set { key, value } => {
+                    self
+                        .set(key, value)
+                        .map_err(|e| Error::new_system_execution_error(e))?;
+                    Ok(CommandResult::None)
+                }
+                &CacheCommand::Flush => {
+                    self
+                        .flush()
+                        .map_err(|e| Error::new_system_execution_error(e))?;
+                    Ok(CommandResult::None)
+                }
+            }
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -171,7 +167,10 @@ mod tests {
         }
     }
 
-    impl StateMachine<CacheCommand> for CacheModel {
+    impl StateMachine for CacheModel {
+        type Command = CacheCommand;
+        type CommandResult = CommandResult;
+
         fn reset(&mut self) {
             self.entries.clear();
             self.min_index = 0;
@@ -199,33 +198,25 @@ mod tests {
             options
         }
 
-        fn postcondition(&self, cmd: &CacheCommand, res: Box<dyn Any>) -> Result<()> {
+        fn postcondition(&self, cmd: &CacheCommand, res: &CommandResult) -> Result<()> {
             if let CacheCommand::Get { key } = cmd {
                 match self.entries.get(&key) {
                     Some(Entry { val, .. }) => {
-                        if let Some(cmd_res) = res.downcast_ref::<CommandResult>() {
-                            if cmd_res != &CommandResult::Some(*val) {
-                                return Result::Err(Error::new_postcondition_error(
-                                    format!("{:?}", cmd),
-                                    format!("{:?}", CommandResult::Some(*val)),
-                                    format!("{:?}", *cmd_res),
-                                ));
-                            }
-                        } else {
-                            panic!("Invalid command result data type")
+                        if res != &CommandResult::Some(*val) {
+                            return Result::Err(Error::new_postcondition_error(
+                                format!("{:?}", cmd),
+                                format!("{:?}", CommandResult::Some(*val)),
+                                format!("{:?}", *res),
+                            ));
                         }
                     }
                     None => {
-                        if let Some(cmd_res) = res.downcast_ref::<CommandResult>() {
-                            if cmd_res != &CommandResult::None {
-                                return Result::Err(Error::new_postcondition_error(
-                                    format!("{:?}", cmd),
-                                    format!("{:?}", CommandResult::None),
-                                    format!("{:?}", *cmd_res),
-                                ));
-                            }
-                        } else {
-                            panic!("Invalid command result data type")
+                        if res != &CommandResult::None {
+                            return Result::Err(Error::new_postcondition_error(
+                                format!("{:?}", cmd),
+                                format!("{:?}", CommandResult::None),
+                                format!("{:?}", *res),
+                            ));
                         }
                     }
                 }
@@ -282,9 +273,7 @@ mod tests {
                 ..ProptestConfig::default()
             },
             MAX_COMMAND_SEQUENCE_SIZE,
-            || {
-                CacheModel::new(MAX_CACHE_SIZE)
-            },
+            CacheModel::new(MAX_CACHE_SIZE),
             || {
                 Box::new(Cache::new(MAX_CACHE_SIZE).expect("Could not construct Cache"))
             });

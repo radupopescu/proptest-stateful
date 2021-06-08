@@ -10,7 +10,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub enum Error {
     /// Error in the execution of the system-under-test
-    SystemExecution {
+    SystemUnderTest {
         source: Box<dyn std::error::Error + 'static>,
     },
     /// Model state machine postcondition does not hold
@@ -22,16 +22,16 @@ pub enum Error {
 }
 
 impl Error {
-    pub fn new_system_execution_error<T>(source: T) -> Error
+    pub fn system_under_test<T>(source: T) -> Error
     where
         T: std::error::Error + 'static,
     {
-        Self::SystemExecution {
+        Self::SystemUnderTest {
             source: Box::new(source),
         }
     }
 
-    pub fn new_postcondition_error<T: AsRef<str>>(command: T, expected: T, actual: T) -> Error {
+    pub fn postcondition<T: AsRef<str>>(command: T, expected: T, actual: T) -> Error {
         Self::Postcondition {
             command: command.as_ref().to_string(),
             expected: expected.as_ref().to_string(),
@@ -43,7 +43,7 @@ impl Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match *self {
-            Error::SystemExecution { ref source } => Some(&**source),
+            Error::SystemUnderTest { ref source } => Some(&**source),
             Error::Postcondition { .. } => None,
         }
     }
@@ -52,7 +52,7 @@ impl std::error::Error for Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Error::SystemExecution { ref source } => source.fmt(f),
+            Error::SystemUnderTest { ref source } => source.fmt(f),
             Error::Postcondition {
                 ref command,
                 ref expected,

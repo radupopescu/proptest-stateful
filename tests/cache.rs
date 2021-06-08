@@ -91,7 +91,7 @@ mod tests {
     use super::Cache;
 
     use proptest::prelude::*;
-    use proptest_stateful::{StateMachine, SystemUnderTest, errors::{Error, Result}, execute_plan};
+    use proptest_stateful::{StateMachine, SystemUnderTest, Error, Result, execute_plan};
 
     #[derive(Debug, Clone)]
     enum CacheCommand {
@@ -112,7 +112,7 @@ mod tests {
                 &CacheCommand::Get { key } => {
                     let v = self
                         .get(key)
-                        .map_err(|e| Error::new_system_execution_error(e))?;
+                        .map_err(|e| Error::system_under_test(e))?;
                     match v {
                         Some(v) => Ok(CommandResult::Some(v)),
                         None => Ok(CommandResult::None),
@@ -121,13 +121,13 @@ mod tests {
                 &CacheCommand::Set { key, value } => {
                     self
                         .set(key, value)
-                        .map_err(|e| Error::new_system_execution_error(e))?;
+                        .map_err(|e| Error::system_under_test(e))?;
                     Ok(CommandResult::None)
                 }
                 &CacheCommand::Flush => {
                     self
                         .flush()
-                        .map_err(|e| Error::new_system_execution_error(e))?;
+                        .map_err(|e| Error::system_under_test(e))?;
                     Ok(CommandResult::None)
                 }
             }
@@ -203,7 +203,7 @@ mod tests {
                 match self.entries.get(&key) {
                     Some(Entry { val, .. }) => {
                         if res != &CommandResult::Some(*val) {
-                            return Result::Err(Error::new_postcondition_error(
+                            return Result::Err(Error::postcondition(
                                 format!("{:?}", cmd),
                                 format!("{:?}", CommandResult::Some(*val)),
                                 format!("{:?}", *res),
@@ -212,7 +212,7 @@ mod tests {
                     }
                     None => {
                         if res != &CommandResult::None {
-                            return Result::Err(Error::new_postcondition_error(
+                            return Result::Err(Error::postcondition(
                                 format!("{:?}", cmd),
                                 format!("{:?}", CommandResult::None),
                                 format!("{:?}", *res),
@@ -266,7 +266,7 @@ mod tests {
         const MAX_CACHE_SIZE: usize = 10;
         const MAX_COMMAND_SEQUENCE_SIZE: usize = 100;
 
-        execute_plan(
+        let result = execute_plan(
             ProptestConfig {
                 max_shrink_iters: 100,
                 source_file: Some("tests/cache.rs"),
@@ -277,5 +277,6 @@ mod tests {
             || {
                 Box::new(Cache::new(MAX_CACHE_SIZE).expect("Could not construct Cache"))
             });
+        assert!(result.is_ok());
     }
 }

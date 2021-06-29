@@ -264,6 +264,7 @@ mod tests {
     #[test]
     fn basic_command_execution() {
         const MAX_CACHE_SIZE: usize = 10;
+        const MIN_COMMAND_SEQUENCE_SIZE: usize = 1;
         const MAX_COMMAND_SEQUENCE_SIZE: usize = 100;
 
         let result = execute_plan(
@@ -272,6 +273,7 @@ mod tests {
                 source_file: Some("tests/cache.rs"),
                 ..ProptestConfig::default()
             },
+            MIN_COMMAND_SEQUENCE_SIZE,
             MAX_COMMAND_SEQUENCE_SIZE,
             CacheModel::new(MAX_CACHE_SIZE),
             || {

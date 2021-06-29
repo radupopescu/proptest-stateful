@@ -16,8 +16,6 @@ use rand::distributions::{uniform::Uniform, Distribution, WeightedIndex};
 pub use errors::{Error, Result};
 pub use traits::{StateMachine, SystemUnderTest};
 
-const MIN_COMMAND_SEQUENCE_SIZE: usize = 1;
-
 #[derive(Debug)]
 pub struct CommandSequence<SM>
 where
@@ -69,6 +67,7 @@ where
 {
     elements: Vec<Box<dyn ValueTree<Value = SM::Command>>>,
     state_machine: SM,
+    min_size: usize,
     num_included: usize,
     shrink: Shrink,
     prev_shrink: Option<Shrink>,
@@ -96,7 +95,7 @@ where
 
     fn simplify(&mut self) -> bool {
         if let Shrink::DeleteCommand = self.shrink {
-            if self.num_included == MIN_COMMAND_SEQUENCE_SIZE {
+            if self.num_included == self.min_size {
                 self.shrink = Shrink::ShrinkCommand(self.num_included - 1);
             } else {
                 self.num_included -= 1;
@@ -154,6 +153,7 @@ where
     SM: StateMachine + Clone,
 {
     state_machine: SM,
+    min_size: usize,
     max_size: usize,
     _strategy: PhantomData<S>,
 }
@@ -163,10 +163,11 @@ where
     S: Strategy,
     SM: StateMachine + Clone,
 {
-    fn new(max_size: usize, state_machine: SM) -> Self {
-        assert!(max_size >= MIN_COMMAND_SEQUENCE_SIZE);
+    fn new(min_size: usize, max_size: usize, state_machine: SM) -> Self {
+        assert!(max_size >= min_size);
         CommandSequenceStrategy {
             state_machine,
+            min_size,
             max_size,
             _strategy: PhantomData,
         }
@@ -206,6 +207,7 @@ where
         Ok(CommandSequenceValueTree {
             elements,
             state_machine,
+            min_size: self.min_size,
             num_included,
             shrink: Shrink::DeleteCommand,
             prev_shrink: None,
@@ -214,17 +216,19 @@ where
 }
 
 pub fn command_sequence<SM>(
+    min_size: usize,
     max_size: usize,
     state_machine: SM,
 ) -> CommandSequenceStrategy<BoxedStrategy<SM::Command>, SM>
 where
     SM: StateMachine + Clone,
 {
-    CommandSequenceStrategy::new(max_size, state_machine)
+    CommandSequenceStrategy::new(min_size, max_size, state_machine)
 }
 
 pub fn execute_plan<SM, SUTF>(
     config: ProptestConfig,
+    min_sequence_size: usize,
     max_sequence_size: usize,
     state_machine: SM,
     system_under_test_factory: SUTF,
@@ -235,7 +239,7 @@ pub fn execute_plan<SM, SUTF>(
     let mut runner = TestRunner::new(config);
 
     let result = runner.run(
-        &command_sequence(max_sequence_size, state_machine),
+        &command_sequence(min_sequence_size, max_sequence_size, state_machine),
         |mut commands| {
             let mut sys = system_under_test_factory();
             commands.run(&mut sys)?;
@@ -369,6 +373,7 @@ mod tests {
                 source_file: Some("tests/cache.rs"),
                 ..ProptestConfig::default()
             },
+            5,
             10,
             model.clone(),
             || Box::new(TestSystem),

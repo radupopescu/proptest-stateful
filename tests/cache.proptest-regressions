@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc 649e83e15c34c3c0229dd5d71f40a7f6b908252a128c0a2373b76d465ddcd259 # shrinks to CommandSequence { commands: [Up { tag: 1 }, Up { tag: 2 }, Up { tag: 3 }], state_machine: TestModel { plan: [Up { tag: 1 }, Up { tag: 2 }, Up { tag: 3 }, Down], target: 3, idx: Cell { value: 0 }, state: 0 } }

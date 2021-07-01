@@ -10,7 +10,11 @@ mod traits;
 
 use std::{fmt::Debug, marker::PhantomData};
 
-use proptest::{prelude::ProptestConfig, strategy::{BoxedStrategy, NewTree, Strategy, ValueTree}, test_runner::{TestError, TestRunner}};
+use proptest::{
+    prelude::ProptestConfig,
+    strategy::{BoxedStrategy, NewTree, Strategy, ValueTree},
+    test_runner::{TestError, TestRunner},
+};
 use rand::distributions::{uniform::Uniform, Distribution, WeightedIndex};
 
 pub use errors::{Error, Result};
@@ -58,7 +62,7 @@ where
 
 #[derive(Clone, Copy, Debug)]
 enum Shrink {
-    DeleteCommand,
+    DeleteCommand(usize),
     ShrinkCommand(usize),
 }
 pub struct CommandSequenceValueTree<SM>
@@ -66,11 +70,19 @@ where
     SM: StateMachine,
 {
     elements: Vec<Box<dyn ValueTree<Value = SM::Command>>>,
+    included: Vec<bool>,
     state_machine: SM,
-    min_size: usize,
-    num_included: usize,
     shrink: Shrink,
     prev_shrink: Option<Shrink>,
+}
+
+impl<SM> CommandSequenceValueTree<SM>
+where
+    SM: StateMachine,
+{
+    fn num_included(&self) -> usize {
+        self.included.iter().filter(|&x| *x).count()
+    }
 }
 
 impl<SM> ValueTree for CommandSequenceValueTree<SM>
@@ -84,7 +96,7 @@ where
             .elements
             .iter()
             .enumerate()
-            .take(self.num_included)
+            .filter(|&(x, _)| self.included[x])
             .map(|(_, element)| element.current())
             .collect();
         CommandSequence {
@@ -94,29 +106,29 @@ where
     }
 
     fn simplify(&mut self) -> bool {
-        if let Shrink::DeleteCommand = self.shrink {
-            if self.num_included == self.min_size {
-                self.shrink = Shrink::ShrinkCommand(self.num_included - 1);
+        if let Shrink::DeleteCommand(index) = self.shrink {
+            if index >= self.elements.len() || self.num_included() == 1 {
+                self.shrink = Shrink::ShrinkCommand(0);
             } else {
-                self.num_included -= 1;
+                self.included[index] = false;
                 self.prev_shrink = Some(self.shrink);
-                self.shrink = Shrink::DeleteCommand;
+                self.shrink = Shrink::DeleteCommand(index + 1);
                 return true;
             }
         }
 
-        while let Shrink::ShrinkCommand(ix) = self.shrink {
-            if ix >= self.elements.len() {
+        while let Shrink::ShrinkCommand(index) = self.shrink {
+            if index >= self.elements.len() {
                 return false;
             }
 
-            if ix >= self.num_included {
-                self.shrink = Shrink::ShrinkCommand(ix - 1);
+            if !self.included[index] {
+                self.shrink = Shrink::ShrinkCommand(index + 1);
                 continue;
             }
 
-            if !self.elements[ix].simplify() {
-                self.shrink = Shrink::ShrinkCommand(ix - 1);
+            if !self.elements[index].simplify() {
+                self.shrink = Shrink::ShrinkCommand(index + 1);
             } else {
                 self.prev_shrink = Some(self.shrink);
                 return true;
@@ -129,8 +141,8 @@ where
     fn complicate(&mut self) -> bool {
         match self.prev_shrink {
             None => false,
-            Some(Shrink::DeleteCommand) => {
-                self.num_included += 1;
+            Some(Shrink::DeleteCommand(index)) => {
+                self.included[index] = true;
                 self.prev_shrink = None;
                 true
             }
@@ -183,7 +195,7 @@ where
     type Value = CommandSequence<SM>;
 
     fn new_tree(&self, runner: &mut proptest::test_runner::TestRunner) -> NewTree<Self> {
-        let size = Uniform::new_inclusive(1, self.max_size).sample(runner.rng());
+        let size = Uniform::new_inclusive(self.min_size, self.max_size).sample(runner.rng());
 
         let mut state_machine = self.state_machine.clone();
         state_machine.reset();
@@ -203,13 +215,12 @@ where
             elements.push(command);
         }
         state_machine.reset();
-        let num_included = elements.len();
+        let num_elements = elements.len();
         Ok(CommandSequenceValueTree {
             elements,
+            included: vec![true; num_elements],
             state_machine,
-            min_size: self.min_size,
-            num_included,
-            shrink: Shrink::DeleteCommand,
+            shrink: Shrink::DeleteCommand(0),
             prev_shrink: None,
         })
     }
@@ -232,7 +243,8 @@ pub fn execute_plan<SM, SUTF>(
     max_sequence_size: usize,
     state_machine: SM,
     system_under_test_factory: SUTF,
-) -> std::result::Result<(), TestError<CommandSequence<SM>>> where
+) -> std::result::Result<(), TestError<CommandSequence<SM>>>
+where
     SM: StateMachine + Clone + std::fmt::Debug,
     SUTF: Fn() -> Box<dyn SystemUnderTest<SM::Command, SM::CommandResult>>,
 {
@@ -260,15 +272,15 @@ mod tests {
     use proptest::strategy::{Just, Strategy};
     use proptest::test_runner::TestError;
 
+    use crate::{errors::Result, execute_plan, Error, StateMachine};
     use crate::{CommandSequence, SystemUnderTest};
-    use crate::{Error, StateMachine, errors::Result, execute_plan};
 
     #[derive(Clone, Debug)]
     struct TestModel {
         plan: Vec<TestCommand>,
         target: usize,
         idx: Cell<usize>,
-        state: isize,
+        state: usize,
     }
 
     impl TestModel {
@@ -313,11 +325,12 @@ mod tests {
         }
 
         fn postcondition(&self, cmd: &Self::Command, _res: &Self::CommandResult) -> Result<()> {
-            let state_update: isize = match cmd {
-                &TestCommand::Up { .. } => 1,
-                &TestCommand::Down => -1,
+            let state_update = if let &TestCommand::Up { .. } = cmd {
+                1
+            } else {
+                0
             };
-            if self.state + state_update == self.target as isize {
+            if self.state + state_update == self.target {
                 return Result::Err(Error::postcondition(
                     format!("{:?}", cmd),
                     format!("{:?}", 0),
@@ -328,10 +341,9 @@ mod tests {
         }
 
         fn next_state(&mut self, cmd: &Self::Command) {
-            match cmd {
-                &TestCommand::Up { .. } => self.state += 1,
-                &TestCommand::Down => self.state -= 1,
-            };
+            if let &TestCommand::Up { .. } = cmd {
+                self.state += 1;
+            }
         }
     }
 
@@ -346,15 +358,22 @@ mod tests {
         }
     }
 
-    fn check_result<SM: StateMachine>(result: std::result::Result<(), TestError<CommandSequence<SM>>>, model: &TestModel) {
+    fn check_result<SM: StateMachine>(
+        result: std::result::Result<(), TestError<CommandSequence<SM>>>,
+        model: &TestModel,
+    ) {
         match result {
             Err(test_error) => match test_error {
                 TestError::Fail(_, seq) => {
-                    assert_eq!(seq.commands.len(), model.target, "Invalid minimal sequence length")
-                },
-                _ => assert!(false, "Test aborted")
+                    assert_eq!(
+                        seq.commands.len(),
+                        model.target,
+                        "Invalid minimal sequence length"
+                    )
+                }
+                _ => assert!(false, "Test aborted"),
             },
-            _ => assert!(false, "Test should have failed")
+            _ => assert!(false, "Test should have failed"),
         }
     }
 
@@ -366,15 +385,68 @@ mod tests {
             TestCommand::Up { tag: 3 },
             TestCommand::Down,
         ];
-        let model = TestModel::new(plan.clone());
+        let plan_length = plan.len();
+        let model = TestModel::new(plan);
         let result = execute_plan(
             ProptestConfig {
                 max_shrink_iters: 100,
-                source_file: Some("tests/cache.rs"),
                 ..ProptestConfig::default()
             },
-            5,
-            10,
+            plan_length,
+            plan_length,
+            model.clone(),
+            || Box::new(TestSystem),
+        );
+        check_result(result, &model);
+    }
+
+    #[test]
+    fn shrink_removes_sequence_head() {
+        let plan = vec![
+            TestCommand::Down,
+            TestCommand::Down,
+            TestCommand::Up { tag: 1 },
+            TestCommand::Up { tag: 2 },
+            TestCommand::Up { tag: 3 },
+        ];
+        let plan_length = plan.len();
+        let model = TestModel::new(plan);
+        let result = execute_plan(
+            ProptestConfig {
+                max_shrink_iters: 100,
+                ..ProptestConfig::default()
+            },
+            plan_length,
+            plan_length,
+            model.clone(),
+            || Box::new(TestSystem),
+        );
+        check_result(result, &model);
+    }
+
+    #[test]
+    fn shrink_removes_arbitrary() {
+        let plan = vec![
+            TestCommand::Down,
+            TestCommand::Up { tag: 1 },
+            TestCommand::Down,
+            TestCommand::Down,
+            TestCommand::Up { tag: 2 },
+            TestCommand::Down,
+            TestCommand::Down,
+            TestCommand::Down,
+            TestCommand::Up { tag: 3 },
+            TestCommand::Down,
+        ];
+        let plan_length = plan.len();
+        let model = TestModel::new(plan);
+        let result = execute_plan(
+            ProptestConfig {
+                max_shrink_iters: 100,
+                ..ProptestConfig::default()
+            },
+            plan_length,
+            plan_length,
             model.clone(),
             || Box::new(TestSystem),
         );

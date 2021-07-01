@@ -4,7 +4,7 @@
 
 ## Overview
 
-proptest-stateful is a library for performing property-based testing of stateful system.
+proptest-stateful is a library for performing property-based testing of stateful systems.
 
 ## License and authorship
 

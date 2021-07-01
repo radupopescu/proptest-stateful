@@ -1,22 +1,23 @@
-//-
+//
 // Copyright 2021 Radu Popescu <mail@radupopescu.net>
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+mod config;
 mod errors;
 mod traits;
 
 use std::{fmt::Debug, marker::PhantomData};
 
 use proptest::{
-    prelude::ProptestConfig,
     strategy::{BoxedStrategy, NewTree, Strategy, ValueTree},
     test_runner::{TestError, TestRunner},
 };
 use rand::distributions::{uniform::Uniform, Distribution, WeightedIndex};
 
+pub use config::Config;
 pub use errors::{Error, Result};
 pub use traits::{StateMachine, SystemUnderTest};
 
@@ -238,9 +239,7 @@ where
 }
 
 pub fn execute_plan<SM, SUTF>(
-    config: ProptestConfig,
-    min_sequence_size: usize,
-    max_sequence_size: usize,
+    config: Config,
     state_machine: SM,
     system_under_test_factory: SUTF,
 ) -> std::result::Result<(), TestError<CommandSequence<SM>>>
@@ -248,10 +247,14 @@ where
     SM: StateMachine + Clone + std::fmt::Debug,
     SUTF: Fn() -> Box<dyn SystemUnderTest<SM::Command, SM::CommandResult>>,
 {
-    let mut runner = TestRunner::new(config);
+    let mut runner = TestRunner::new(config.proptest);
 
     let result = runner.run(
-        &command_sequence(min_sequence_size, max_sequence_size, state_machine),
+        &command_sequence(
+            config.min_sequence_size,
+            config.max_sequence_size,
+            state_machine,
+        ),
         |mut commands| {
             let mut sys = system_under_test_factory();
             commands.run(&mut sys)?;
@@ -268,11 +271,10 @@ where
 mod tests {
     use std::cell::Cell;
 
-    use proptest::prelude::*;
     use proptest::strategy::{Just, Strategy};
     use proptest::test_runner::TestError;
 
-    use crate::{errors::Result, execute_plan, Error, StateMachine};
+    use crate::{config::Config, errors::Result, execute_plan, Error, StateMachine};
     use crate::{CommandSequence, SystemUnderTest};
 
     #[derive(Clone, Debug)]
@@ -294,7 +296,7 @@ mod tests {
                 .count();
             TestModel {
                 plan,
-                target: target,
+                target,
                 idx: Cell::new(0),
                 state: 0,
             }
@@ -378,29 +380,6 @@ mod tests {
     }
 
     #[test]
-    fn shrink_removes_sequence_tail() {
-        let plan = vec![
-            TestCommand::Up { tag: 1 },
-            TestCommand::Up { tag: 2 },
-            TestCommand::Up { tag: 3 },
-            TestCommand::Down,
-        ];
-        let plan_length = plan.len();
-        let model = TestModel::new(plan);
-        let result = execute_plan(
-            ProptestConfig {
-                max_shrink_iters: 100,
-                ..ProptestConfig::default()
-            },
-            plan_length,
-            plan_length,
-            model.clone(),
-            || Box::new(TestSystem),
-        );
-        check_result(result, &model);
-    }
-
-    #[test]
     fn shrink_removes_sequence_head() {
         let plan = vec![
             TestCommand::Down,
@@ -411,16 +390,29 @@ mod tests {
         ];
         let plan_length = plan.len();
         let model = TestModel::new(plan);
-        let result = execute_plan(
-            ProptestConfig {
-                max_shrink_iters: 100,
-                ..ProptestConfig::default()
-            },
-            plan_length,
-            plan_length,
-            model.clone(),
-            || Box::new(TestSystem),
-        );
+        let mut config = Config::default();
+        config.min_sequence_size = plan_length;
+        config.max_sequence_size = plan_length;
+        config.proptest.max_shrink_iters = 100;
+        let result = execute_plan(config, model.clone(), || Box::new(TestSystem));
+        check_result(result, &model);
+    }
+
+    #[test]
+    fn shrink_removes_sequence_tail() {
+        let plan = vec![
+            TestCommand::Up { tag: 1 },
+            TestCommand::Up { tag: 2 },
+            TestCommand::Up { tag: 3 },
+            TestCommand::Down,
+        ];
+        let plan_length = plan.len();
+        let model = TestModel::new(plan);
+        let mut config = Config::default();
+        config.min_sequence_size = plan_length;
+        config.max_sequence_size = plan_length;
+        config.proptest.max_shrink_iters = 100;
+        let result = execute_plan(config, model.clone(), || Box::new(TestSystem));
         check_result(result, &model);
     }
 
@@ -440,16 +432,11 @@ mod tests {
         ];
         let plan_length = plan.len();
         let model = TestModel::new(plan);
-        let result = execute_plan(
-            ProptestConfig {
-                max_shrink_iters: 100,
-                ..ProptestConfig::default()
-            },
-            plan_length,
-            plan_length,
-            model.clone(),
-            || Box::new(TestSystem),
-        );
+        let mut config = Config::default();
+        config.min_sequence_size = plan_length;
+        config.max_sequence_size = plan_length;
+        config.proptest.max_shrink_iters = 100;
+        let result = execute_plan(config, model.clone(), || Box::new(TestSystem));
         check_result(result, &model);
     }
 }

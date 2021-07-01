@@ -1,4 +1,4 @@
-//-
+//
 // Copyright 2021 Radu Popescu <mail@radupopescu.net>
 //
 // This Source Code Form is subject to the terms of the Mozilla Public
@@ -91,7 +91,7 @@ mod tests {
     use super::Cache;
 
     use proptest::prelude::*;
-    use proptest_stateful::{StateMachine, SystemUnderTest, Error, Result, execute_plan};
+    use proptest_stateful::{execute_plan, Config, Error, Result, StateMachine, SystemUnderTest};
 
     #[derive(Debug, Clone)]
     enum CacheCommand {
@@ -110,24 +110,19 @@ mod tests {
         fn run(&mut self, cmd: &CacheCommand) -> Result<CommandResult> {
             match cmd {
                 &CacheCommand::Get { key } => {
-                    let v = self
-                        .get(key)
-                        .map_err(|e| Error::system_under_test(e))?;
+                    let v = self.get(key).map_err(|e| Error::system_under_test(e))?;
                     match v {
                         Some(v) => Ok(CommandResult::Some(v)),
                         None => Ok(CommandResult::None),
                     }
                 }
                 &CacheCommand::Set { key, value } => {
-                    self
-                        .set(key, value)
+                    self.set(key, value)
                         .map_err(|e| Error::system_under_test(e))?;
                     Ok(CommandResult::None)
                 }
                 &CacheCommand::Flush => {
-                    self
-                        .flush()
-                        .map_err(|e| Error::system_under_test(e))?;
+                    self.flush().map_err(|e| Error::system_under_test(e))?;
                     Ok(CommandResult::None)
                 }
             }
@@ -260,25 +255,15 @@ mod tests {
         }
     }
 
-
     #[test]
-    fn basic_command_execution() {
+    fn cache() {
         const MAX_CACHE_SIZE: usize = 10;
-        const MIN_COMMAND_SEQUENCE_SIZE: usize = 1;
-        const MAX_COMMAND_SEQUENCE_SIZE: usize = 100;
-
-        let result = execute_plan(
-            ProptestConfig {
-                max_shrink_iters: 100,
-                source_file: Some("tests/cache.rs"),
-                ..ProptestConfig::default()
-            },
-            MIN_COMMAND_SEQUENCE_SIZE,
-            MAX_COMMAND_SEQUENCE_SIZE,
-            CacheModel::new(MAX_CACHE_SIZE),
-            || {
-                Box::new(Cache::new(MAX_CACHE_SIZE).expect("Could not construct Cache"))
-            });
+        let mut config = Config::default();
+        config.proptest.max_shrink_iters = 100;
+        config.proptest.source_file = Some("tests/cache.rs");
+        let result = execute_plan(config, CacheModel::new(MAX_CACHE_SIZE), || {
+            Box::new(Cache::new(MAX_CACHE_SIZE).expect("Could not construct Cache"))
+        });
         assert!(result.is_ok());
     }
 }

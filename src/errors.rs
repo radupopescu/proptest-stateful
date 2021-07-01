@@ -1,4 +1,4 @@
-//-
+//
 // Copyright 2021 Radu Popescu <mail@radupopescu.net>
 //
 // This Source Code Form is subject to the terms of the Mozilla Public

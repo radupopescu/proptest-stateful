@@ -75,6 +75,7 @@ where
     state_machine: SM,
     shrink: Shrink,
     prev_shrink: Option<Shrink>,
+    shrink_commands: bool,
 }
 
 impl<SM> CommandSequenceValueTree<SM>
@@ -116,6 +117,10 @@ where
                 self.shrink = Shrink::DeleteCommand(index + 1);
                 return true;
             }
+        }
+
+        if !self.shrink_commands {
+            return false;
         }
 
         while let Shrink::ShrinkCommand(index) = self.shrink {
@@ -168,6 +173,7 @@ where
     state_machine: SM,
     min_size: usize,
     max_size: usize,
+    shrink_commands: bool,
     _strategy: PhantomData<S>,
 }
 
@@ -176,12 +182,13 @@ where
     S: Strategy,
     SM: StateMachine + Clone,
 {
-    fn new(min_size: usize, max_size: usize, state_machine: SM) -> Self {
+    fn new(min_size: usize, max_size: usize, shrink_commands: bool, state_machine: SM) -> Self {
         assert!(max_size >= min_size);
         CommandSequenceStrategy {
             state_machine,
             min_size,
             max_size,
+            shrink_commands,
             _strategy: PhantomData,
         }
     }
@@ -223,19 +230,19 @@ where
             state_machine,
             shrink: Shrink::DeleteCommand(0),
             prev_shrink: None,
+            shrink_commands: self.shrink_commands,
         })
     }
 }
 
 pub fn command_sequence<SM>(
-    min_size: usize,
-    max_size: usize,
+    config: &Config,
     state_machine: SM,
 ) -> CommandSequenceStrategy<BoxedStrategy<SM::Command>, SM>
 where
     SM: StateMachine + Clone,
 {
-    CommandSequenceStrategy::new(min_size, max_size, state_machine)
+    CommandSequenceStrategy::new(config.min_sequence_size, config.max_sequence_size, config.shrink_commands, state_machine)
 }
 
 pub fn execute_plan<SM, SUTF>(
@@ -247,14 +254,10 @@ where
     SM: StateMachine + Clone + std::fmt::Debug,
     SUTF: Fn() -> Box<dyn SystemUnderTest<SM::Command, SM::CommandResult>>,
 {
-    let mut runner = TestRunner::new(config.proptest);
+    let mut runner = TestRunner::new(config.proptest.clone());
 
     let result = runner.run(
-        &command_sequence(
-            config.min_sequence_size,
-            config.max_sequence_size,
-            state_machine,
-        ),
+        &command_sequence(&config, state_machine),
         |mut commands| {
             let mut sys = system_under_test_factory();
             commands.run(&mut sys)?;

@@ -235,7 +235,7 @@ where
     }
 }
 
-pub fn command_sequence<SM>(
+fn command_sequence<SM>(
     config: &Config,
     state_machine: SM,
 ) -> CommandSequenceStrategy<BoxedStrategy<SM::Command>, SM>
@@ -245,7 +245,9 @@ where
     CommandSequenceStrategy::new(config.min_sequence_size, config.max_sequence_size, config.shrink_commands, state_machine)
 }
 
-pub fn execute_plan<SM, SUTF>(
+/// Run a set of tests for the provided system-under-test, using the given
+/// state machine model and configuration parameters
+pub fn run<SM, SUTF>(
     config: Config,
     state_machine: SM,
     system_under_test_factory: SUTF,
@@ -277,7 +279,7 @@ mod tests {
     use proptest::strategy::{Just, Strategy};
     use proptest::test_runner::TestError;
 
-    use crate::{config::Config, errors::Result, execute_plan, Error, StateMachine};
+    use crate::{config::Config, errors::Result, run, Error, StateMachine};
     use crate::{CommandSequence, SystemUnderTest};
 
     #[derive(Clone, Debug)]
@@ -397,7 +399,7 @@ mod tests {
         config.min_sequence_size = plan_length;
         config.max_sequence_size = plan_length;
         config.proptest.max_shrink_iters = 100;
-        let result = execute_plan(config, model.clone(), || Box::new(TestSystem));
+        let result = run(config, model.clone(), || Box::new(TestSystem));
         check_result(result, &model);
     }
 
@@ -415,7 +417,7 @@ mod tests {
         config.min_sequence_size = plan_length;
         config.max_sequence_size = plan_length;
         config.proptest.max_shrink_iters = 100;
-        let result = execute_plan(config, model.clone(), || Box::new(TestSystem));
+        let result = run(config, model.clone(), || Box::new(TestSystem));
         check_result(result, &model);
     }
 
@@ -439,7 +441,7 @@ mod tests {
         config.min_sequence_size = plan_length;
         config.max_sequence_size = plan_length;
         config.proptest.max_shrink_iters = 100;
-        let result = execute_plan(config, model.clone(), || Box::new(TestSystem));
+        let result = run(config, model.clone(), || Box::new(TestSystem));
         check_result(result, &model);
     }
 }

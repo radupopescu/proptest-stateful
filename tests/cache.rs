@@ -91,7 +91,7 @@ mod tests {
     use super::Cache;
 
     use proptest::prelude::*;
-    use proptest_stateful::{execute_plan, Config, Error, Result, StateMachine, SystemUnderTest};
+    use proptest_stateful::{run, Config, Error, Result, StateMachine, SystemUnderTest};
 
     #[derive(Debug, Clone)]
     enum CacheCommand {
@@ -261,7 +261,7 @@ mod tests {
         let mut config = Config::default();
         config.proptest.max_shrink_iters = 100;
         config.proptest.source_file = Some("tests/cache.rs");
-        let result = execute_plan(config, CacheModel::new(MAX_CACHE_SIZE), || {
+        let result = run(config, CacheModel::new(MAX_CACHE_SIZE), || {
             Box::new(Cache::new(MAX_CACHE_SIZE).expect("Could not construct Cache"))
         });
         assert!(result.is_ok());

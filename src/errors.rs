@@ -7,6 +7,7 @@
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// The errors which can be produced by the library
 #[derive(Debug)]
 pub enum Error {
     /// Error in the execution of the system-under-test
